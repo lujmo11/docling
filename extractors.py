@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 import io
 import pandas as pd
 from models import Requirement
-from utils import SectionTracker, find_normative_strength, extract_numbers_with_units, canonicalize, infer_subject
+from utils import SectionTracker, find_normative_strength, extract_numbers_with_units, canonicalize, infer_subject, collect_references, guess_category
 
 def extract_from_rs_text(doc_json: Dict[str, Any], doc_meta: Dict[str, Any]) -> List[Requirement]:
     """
@@ -11,12 +11,6 @@ def extract_from_rs_text(doc_json: Dict[str, Any], doc_meta: Dict[str, Any]) -> 
     """
     requirements = []
     section_tracker = SectionTracker()
-    
-    # Placeholder for functions from future chunks
-    def collect_references(text): return []
-    def guess_category(path, text): return "unknown"
-    def canonicalize(subject, raw): return f"The {subject} shall {raw}"
-    def make_evidence_query(subject, canonical, refs): return f"{subject} {canonical}"
 
     for block in doc_json.get("blocks", []):
         section_path = section_tracker.update_and_get_path(block)
@@ -40,15 +34,15 @@ def extract_from_rs_text(doc_json: Dict[str, Any], doc_meta: Dict[str, Any]) -> 
             vm_match = re.search(r'Verification method:\s*(.*?)\.', req_text_raw, re.IGNORECASE)
             if vm_match:
                 verification_method = vm_match.group(1).strip()
-                # Remove the verification method part from the raw text
+                # Remove only the verification method part from the raw text, keep everything before it
                 req_text_raw = req_text_raw[:vm_match.start()].strip()
 
             # Use functions from previous and future chunks
             normative_strength = find_normative_strength(req_text_raw)
             acceptance_criteria = extract_numbers_with_units(req_text_raw)
-            references = [] # TODO: Chunk 8 - collect_references(req_text_raw)
+            references = collect_references(req_text_raw)
             subject = infer_subject(section_path, req_text_raw, "generator")
-            category = None # TODO: Chunk 8 - guess_category(section_path, req_text_raw)
+            category = guess_category(section_path, req_text_raw)
             canonical_statement = canonicalize(subject, req_text_raw)
             evidence_query = f"{subject} {canonical_statement}" # TODO: Chunk 9 - make_evidence_query
 
@@ -176,9 +170,9 @@ def extract_from_tps_tables(tables_data: Dict[str, Any], doc_meta: Dict[str, Any
                 requirement_raw=raw_text,
                 acceptance_criteria=ac_list,
                 verification_method=verification_method,
-                references=[],
+                references=collect_references(raw_text),
                 subject=subject,
-                category=None,
+                category=guess_category([], raw_text),
                 tags=[],
                 evidence_query=f"{subject} {canonical_statement}",
             )

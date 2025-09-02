@@ -128,6 +128,10 @@ def canonicalize(subject: str, raw: str) -> str:
     # If it starts with "the" but not "the [subject]", leave it as-is
     if raw_lower.startswith("the "):
         return raw
+        
+    # If it already contains "shall" or "must", it's likely already a proper requirement statement
+    if " shall " in raw_lower or " must " in raw_lower:
+        return raw
     
     # Otherwise, prepend "The {subject} shall " and lowercase the first char of raw
     first_char = raw[0].lower() if raw else ""
@@ -150,3 +154,108 @@ def infer_subject(section_path: List[str], raw_text: str, default: str = "genera
     # For now, just return the default - this can be enhanced later
     # with keyword-based inference from section_path and raw_text
     return default
+
+def collect_references(text: str) -> List[str]:
+    """
+    Collect standard references (IEC/ISO/DIN/UL/CSA) from text.
+    
+    Args:
+        text: Text to search for references
+        
+    Returns:
+        List of found reference strings
+    """
+    references = []
+    
+    # Pattern for IEC standards: IEC followed by numbers, optionally with part numbers and years
+    iec_pattern = r'\bIEC\s+\d+(?:-\d+)*(?::\d{4})?\b'
+    references.extend(re.findall(iec_pattern, text, re.IGNORECASE))
+    
+    # Pattern for ISO standards: ISO followed by numbers, optionally with part numbers and years  
+    iso_pattern = r'\bISO\s+\d+(?:-\d+)*(?::\d{4})?\b'
+    references.extend(re.findall(iso_pattern, text, re.IGNORECASE))
+    
+    # Pattern for DIN standards: DIN followed by numbers
+    din_pattern = r'\bDIN\s+\d+(?:-\d+)*\b'
+    references.extend(re.findall(din_pattern, text, re.IGNORECASE))
+    
+    # Pattern for UL standards: UL followed by numbers, optionally with part numbers
+    ul_pattern = r'\bUL\s+\d+(?:-\d+)*\b'
+    references.extend(re.findall(ul_pattern, text, re.IGNORECASE))
+    
+    # Pattern for CSA standards: CSA followed by identifier
+    csa_pattern = r'\bCSA\s+[A-Z]+-\d+(?:-\d+)*\b'
+    references.extend(re.findall(csa_pattern, text, re.IGNORECASE))
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_refs = []
+    for ref in references:
+        if ref not in seen:
+            seen.add(ref)
+            unique_refs.append(ref)
+    
+    return unique_refs
+
+def guess_category(section_path: List[str], raw_text: str) -> Optional[str]:
+    """
+    Guess the category of a requirement based on section path and content.
+    
+    Args:
+        section_path: Current document section path
+        raw_text: Raw requirement text
+        
+    Returns:
+        Guessed category string or None if no clear category
+    """
+    # Combine section path and raw text for keyword matching
+    combined_text = " ".join(section_path + [raw_text]).lower()
+    
+    # Environmental category keywords (check first due to specificity)
+    environmental_keywords = [
+        "ip54", "ip55", "ip56", "enclosure protection", "ingress protection",
+        "humidity", "altitude", "environmental", "climate", "weather", 
+        "corrosion", "coating", "sealing", "ingress", "operating temperature",
+        "ambient temperature", "storage temperature"
+    ]
+    
+    # Electrical category keywords
+    electrical_keywords = [
+        "voltage", "current", "power", "electrical", "insulation", "conductor", 
+        "winding", "stator", "rotor", "terminal", "connection", "earthing", 
+        "grounding", "isolation", "dielectric", "breakdown", "surge", "overvoltage"
+    ]
+    
+    # Mechanical category keywords  
+    mechanical_keywords = [
+        "vibration", "mechanical", "shaft", "bearing", "housing", "mounting",
+        "coupling", "alignment", "balancing", "deflection", "forces", "torque",
+        "speed", "rpm", "rotation", "clearance", "tolerance", "dimension"
+    ]
+    
+    # Control/instrumentation category keywords (more specific patterns)
+    control_keywords = [
+        "encoder", "sensor monitoring", "control system", "feedback", "signal",
+        "instrumentation", "measurement", "alarm", "trip", "pt100", 
+        "thermocouple", "pressure sensor", "flow sensor"
+    ]
+    
+    # Safety category keywords
+    safety_keywords = [
+        "safety", "emergency", "stop", "shutdown", "interlock", 
+        "guard", "barrier", "hazard", "risk", "fail-safe", "redundancy"
+    ]
+    
+    # Check for matches in order of specificity (environmental first)
+    if any(keyword in combined_text for keyword in environmental_keywords):
+        return "environmental"
+    elif any(keyword in combined_text for keyword in electrical_keywords):
+        return "electrical"
+    elif any(keyword in combined_text for keyword in mechanical_keywords):
+        return "mechanical"  
+    elif any(keyword in combined_text for keyword in control_keywords):
+        return "control"
+    elif any(keyword in combined_text for keyword in safety_keywords):
+        return "safety"
+    
+    return None

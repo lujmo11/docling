@@ -1,5 +1,5 @@
 import unittest
-from utils import normalize_unit, extract_numbers_with_units, find_normative_strength, SectionTracker, canonicalize, infer_subject
+from utils import normalize_unit, extract_numbers_with_units, find_normative_strength, SectionTracker, canonicalize, infer_subject, collect_references, guess_category
 
 class TestUtils(unittest.TestCase):
 
@@ -114,6 +114,62 @@ class TestUtils(unittest.TestCase):
         
         # Test custom default
         self.assertEqual(infer_subject([], "some text", "motor"), "motor")
+
+    def test_collect_references(self):
+        # Test cases from the plan
+        test_cases = [
+            ("according to IEC 60034-5", ["IEC 60034-5"]),
+            ("per IEC 60034-14:2004 standard", ["IEC 60034-14:2004"]),
+            ("ISO 1940-1:2003 requirements", ["ISO 1940-1:2003"]),
+            ("DIN 42955 specification", ["DIN 42955"]),
+            ("UL 1004-1 compliance", ["UL 1004-1"]),
+            ("CSA SPE-1000-13 standard", ["CSA SPE-1000-13"]),
+            ("Multiple standards: IEC 60034-5 and ISO 1940-1:2003", ["IEC 60034-5", "ISO 1940-1:2003"]),
+            ("No standards mentioned here", []),
+            ("Case insensitive iec 60034-5", ["iec 60034-5"]),
+        ]
+        
+        for text, expected in test_cases:
+            with self.subTest(text=text):
+                result = collect_references(text)
+                self.assertEqual(result, expected)
+
+    def test_guess_category(self):
+        # Test cases from the plan and additional coverage
+        test_cases = [
+            # Electrical
+            (["Electrical requirements"], "voltage limits", "electrical"),
+            ([], "insulation breakdown voltage", "electrical"),
+            ([], "stator winding resistance", "electrical"),
+            
+            # Mechanical  
+            (["Mechanical"], "vibration levels", "mechanical"),
+            ([], "shaft deflection limits", "mechanical"),
+            ([], "bearing temperature", "mechanical"),
+            
+            # Control
+            ([], "encoder resolution", "control"),
+            ([], "sensor monitoring system", "control"),
+            ([], "control system feedback", "control"),
+            
+            # Environmental
+            ([], "IP54 enclosure protection", "environmental"),
+            ([], "operating temperature range", "environmental"),
+            ([], "humidity protection", "environmental"),
+            
+            # Safety
+            ([], "emergency stop requirements", "safety"),
+            ([], "safety interlock system", "safety"),
+            
+            # No clear category
+            ([], "general documentation", None),
+            ([], "unrelated text", None),
+        ]
+        
+        for section_path, raw_text, expected in test_cases:
+            with self.subTest(section_path=section_path, raw_text=raw_text):
+                result = guess_category(section_path, raw_text)
+                self.assertEqual(result, expected)
 
 if __name__ == '__main__':
     unittest.main()
