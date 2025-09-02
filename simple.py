@@ -9,6 +9,10 @@ import json
 # For table normalization and file outputs
 import pandas as pd
 
+from models import Requirement, AcceptanceCriterion
+from writers import write_requirements_jsonl, write_requirements_csv
+from extractors import extract_from_rs_text, extract_from_tps_tables
+
 try:
     from docling.document_converter import DocumentConverter
     # Try to import new API components, fall back gracefully
@@ -36,7 +40,7 @@ def setup_logging(level: int = logging.INFO, logfile: Optional[Path] = None) -> 
 	)
 
 
-def convert_docx(source: str, out_dir: str) -> dict:
+def convert_docx(source: str, out_dir: str, extract_reqs: bool = True) -> dict:
     """Convert document using docling API with multi-format export and table extraction."""
     logger = logging.getLogger("simple")
     out = Path(out_dir)
@@ -186,7 +190,106 @@ def convert_docx(source: str, out_dir: str) -> dict:
         logger.exception("Failed to export document: %s", e)
         raise
 
+    if extract_reqs:
+        try:
+            logger.info("Starting requirements extraction...")
+            req_output_files = extract_requirements(out)
+            output_files.update(req_output_files)
+            logger.info("Finished requirements extraction.")
+        except Exception as e:
+            logger.error("Requirement extraction failed: %s", e, exc_info=True)
+            # Do not re-raise; allow main conversion to continue
+
     logger.info("Conversion successful for %s", source)
+    return output_files
+
+
+def extract_requirements(out_dir: Path) -> dict:
+    """Extracts requirements from generated doc artifacts and writes JSONL/CSV."""
+    logger = logging.getLogger("simple")
+
+    doc_json_path = out_dir / "document.json"
+    tables_json_path = out_dir / "tables_data.json"
+
+    # Build minimal doc_meta from out_dir name
+    base_name = Path(out_dir).name
+    if base_name.endswith("_output"):
+        base_name = base_name[:-7]
+    doc_meta = {"document_id": base_name, "title": base_name}
+
+    # Load docling JSON if present
+    doc_json = {"blocks": []}
+    try:
+        if doc_json_path.exists():
+            raw = json.loads(doc_json_path.read_text(encoding="utf-8"))
+            # Some exports may nest content; prefer a top-level with blocks
+            if isinstance(raw, dict) and "blocks" in raw:
+                doc_json = raw
+            elif isinstance(raw, dict) and "document" in raw and isinstance(raw["document"], dict):
+                if "blocks" in raw["document"]:
+                    doc_json = raw["document"]
+            # Fallback: synthesize blocks from docling 'texts' list if no blocks were found
+            if (not doc_json.get("blocks")) and isinstance(raw, dict) and "texts" in raw and isinstance(raw["texts"], list):
+                blocks = []
+                for t in raw["texts"]:
+                    if not isinstance(t, dict):
+                        continue
+                    label = (t.get("label") or "").lower()
+                    text = t.get("text") or ""
+                    if not text:
+                        continue
+                    if label in ("heading", "header"):
+                        # Try to infer level from name like 'header-0' in groups or default 1
+                        blocks.append({"type": "heading", "level": 1, "text": text})
+                    elif label in ("paragraph", "list", "inline"):
+                        blocks.append({"type": "paragraph", "text": text})
+                doc_json = {"blocks": blocks}
+    except Exception as e:
+        logger.warning("Could not parse document.json for extraction: %s", e)
+
+    # Load tables data if present
+    tables_data = {}
+    try:
+        if tables_json_path.exists():
+            tables_data = json.loads(tables_json_path.read_text(encoding="utf-8"))
+            # Our TPS extractor expects a dict of table_id -> { csv_data: ... }
+            # The saved structure already matches this shape.
+    except Exception as e:
+        logger.warning("Could not parse tables_data.json for extraction: %s", e)
+
+    requirements: list[Requirement] = []
+
+    # RS free text extractor
+    try:
+        rs_reqs = extract_from_rs_text(doc_json, doc_meta)
+        requirements.extend(rs_reqs)
+        logger.info("RS extractor produced %d requirements", len(rs_reqs))
+    except Exception as e:
+        logger.warning("RS extraction failed: %s", e, exc_info=True)
+
+    # TPS table extractor
+    try:
+        if tables_data:
+            tps_reqs = extract_from_tps_tables(tables_data, doc_meta)
+            requirements.extend(tps_reqs)
+            logger.info("TPS extractor produced %d requirements", len(tps_reqs))
+    except Exception as e:
+        logger.warning("TPS extraction failed: %s", e, exc_info=True)
+
+    output_files = {}
+
+    # Write JSONL
+    jsonl_path = out_dir / "requirements.jsonl"
+    write_requirements_jsonl(requirements, jsonl_path)
+    output_files["requirements_jsonl"] = str(jsonl_path)
+    logger.info("Wrote requirements to %s", jsonl_path)
+
+    # Write CSV
+    csv_path = out_dir / "requirements.csv"
+    write_requirements_csv(requirements, csv_path)
+    output_files["requirements_csv"] = str(csv_path)
+    logger.info("Wrote requirements to %s", csv_path)
+
     return output_files
 
 
@@ -197,6 +300,7 @@ def main(argv: Optional[list] = None) -> int:
 	parser.add_argument("--log-level", default="INFO", help="Set log level (DEBUG, INFO, WARNING, ERROR)")
 	parser.add_argument("--log-file", default=None, help="Optional log file path")
 	parser.add_argument("--out-dir", default=None, help="Output directory for all files (default: source_name_output)")
+	parser.add_argument("--no-extract-reqs", action="store_false", dest="extract_reqs", help="Disable requirements extraction step")
 	args = parser.parse_args(argv)
 
 	level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -214,7 +318,7 @@ def main(argv: Optional[list] = None) -> int:
 			out_dir = f"{source_path.stem}_output"
 		
 		try:
-			output_files = convert_docx(str(source_path), out_dir)
+			output_files = convert_docx(str(source_path), out_dir, extract_reqs=args.extract_reqs)
 			logger.info("All files written to directory: %s", out_dir)
 			for format_name, file_path in output_files.items():
 				logger.info("  %s: %s", format_name, file_path)
@@ -229,7 +333,7 @@ def main(argv: Optional[list] = None) -> int:
 		logger.info("No source provided, using default sample file: %s", default_path)
 		out_dir = args.out_dir or f"{default_path.stem}_output"
 		try:
-			output_files = convert_docx(str(default_path), out_dir)
+			output_files = convert_docx(str(default_path), out_dir, extract_reqs=args.extract_reqs)
 			logger.info("All files written to directory: %s", out_dir)
 			for format_name, file_path in output_files.items():
 				logger.info("  %s: %s", format_name, file_path)

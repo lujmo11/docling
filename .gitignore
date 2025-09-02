@@ -1,0 +1,39 @@
+# Document inputs/outputs
+*.docx
+*.doc
+*.md
+*.txt
+*.json
+*.jsonl
+*_output/
+*_output\
+
+# Tables and requirement outputs
+requirements.csv
+requirements.jsonl
+tables_data.json
+tables_info.csv
+
+'temp'*
+
+# Python
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environments
+.env
+.venv/
+venv/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
