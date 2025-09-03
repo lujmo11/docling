@@ -259,3 +259,94 @@ def guess_category(section_path: List[str], raw_text: str) -> Optional[str]:
         return "safety"
     
     return None
+
+def make_evidence_query(subject: str, canonical: str, refs: List[str]) -> str:
+    """
+    Generate a concise evidence query for a requirement.
+    
+    Args:
+        subject: The subject of the requirement (e.g., "generator")
+        canonical: Canonical requirement statement
+        refs: List of reference standards
+        
+    Returns:
+        A short query string suitable for search or LLM evidence matching
+    """
+    # Basic input validation
+    if not canonical.strip():
+        return f"{subject} requirement"
+    
+    # Simple stopwords to filter out
+    stopwords = {
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", 
+        "of", "with", "by", "shall", "must", "should", "may", "will", "be", 
+        "is", "are", "was", "were", "have", "has", "had", "do", "does", "did"
+    }
+    
+    # Tokenize canonical statement and filter
+    tokens = re.findall(r'\b\w+\b', canonical.lower())
+    content_tokens = [t for t in tokens if t not in stopwords and len(t) > 2]
+    
+    # Score tokens for importance
+    scored_tokens = []
+    for token in content_tokens:
+        score = 0
+        
+        # High priority for numeric-looking tokens and units
+        if re.match(r'\d+', token) or token in ["ip54", "ip55", "ip56", "kv", "rpm", "hz", "degc"]:
+            score += 3
+        
+        # Medium priority for technical terms
+        if any(keyword in token for keyword in ["protection", "enclosure", "voltage", "current", 
+                                               "vibration", "bearing", "stator", "rotor", "winding"]):
+            score += 2
+        
+        # Subject-related tokens get priority
+        if subject.lower() in token or token in subject.lower():
+            score += 2
+        
+        # Default score for other content words
+        score += 1
+        
+        scored_tokens.append((score, token))
+    
+    # Sort by score and take top tokens
+    scored_tokens.sort(key=lambda x: (-x[0], x[1]))  # Sort by score desc, then alphabetically
+    selected_tokens = [token for score, token in scored_tokens[:6]]
+    
+    # Extract numeric values with units from the canonical statement
+    numeric_criteria = extract_numbers_with_units(canonical)
+    numeric_parts = []
+    for criterion in numeric_criteria[:2]:  # Limit to first 2 numeric criteria
+        comp = criterion.comparator
+        val = criterion.value
+        unit = criterion.unit or ""
+        numeric_parts.append(f"{comp} {val} {unit}".strip())
+    
+    # Build query components
+    query_parts = [subject]
+    
+    # Add selected content tokens
+    query_parts.extend(selected_tokens[:4])  # Limit content tokens
+    
+    # Add numeric criteria
+    query_parts.extend(numeric_parts)
+    
+    # Add up to 2 references
+    if refs:
+        query_parts.extend(refs[:2])
+    
+    # Join and clean up
+    query = " ".join(query_parts)
+    query = re.sub(r'\s+', ' ', query)  # Collapse whitespace
+    query = query.strip()
+    
+    # Truncate if too long (keep subject + first few important parts)
+    if len(query) > 120:
+        # Keep subject + first 3 content tokens + first reference
+        safe_parts = [subject] + selected_tokens[:3]
+        if refs:
+            safe_parts.append(refs[0])
+        query = " ".join(safe_parts)
+    
+    return query

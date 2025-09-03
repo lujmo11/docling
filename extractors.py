@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 import io
 import pandas as pd
 from models import Requirement
-from utils import SectionTracker, find_normative_strength, extract_numbers_with_units, canonicalize, infer_subject, collect_references, guess_category
+from utils import SectionTracker, find_normative_strength, extract_numbers_with_units, canonicalize, infer_subject, collect_references, guess_category, make_evidence_query
 
 def extract_from_rs_text(doc_json: Dict[str, Any], doc_meta: Dict[str, Any]) -> List[Requirement]:
     """
@@ -44,7 +44,7 @@ def extract_from_rs_text(doc_json: Dict[str, Any], doc_meta: Dict[str, Any]) -> 
             subject = infer_subject(section_path, req_text_raw, "generator")
             category = guess_category(section_path, req_text_raw)
             canonical_statement = canonicalize(subject, req_text_raw)
-            evidence_query = f"{subject} {canonical_statement}" # TODO: Chunk 9 - make_evidence_query
+            evidence_query = make_evidence_query(subject, canonical_statement, references)
 
             req = Requirement(
                 requirement_uid=f"RS:#{marker_id}",
@@ -107,6 +107,28 @@ def extract_from_tps_tables(tables_data: Dict[str, Any], doc_meta: Dict[str, Any
             second = df.iloc[:, 1].astype(str).str.strip()
             if (second.str.match(r"^#\s*\d+(?:[\.-]\d+)?\s*$").fillna(False).any()):
                 is_two_col_with_ids = True
+                
+        # Case C: Parameter-Value tables (common in technical specifications)
+        is_parameter_value_table = False
+        if len(df.columns) == 2 and not is_two_col_with_ids:
+            # Check if first column contains parameter names and second column contains values
+            # Common headers for parameter-value tables
+            param_headers = ['parameter', 'description', 'test method', 'direction', 'temperature', 'pressure']
+            value_headers = ['value', 'setting', 'specification', 'requirement', 'result']
+            
+            col0_lower = str(df.columns[0]).lower()
+            col1_lower = str(df.columns[1]).lower()
+            
+            # Check if column headers match parameter-value pattern
+            if any(ph in col0_lower for ph in param_headers) or any(vh in col1_lower for vh in value_headers):
+                is_parameter_value_table = True
+            # Even if headers don't match, check if it looks like a parameter-value table
+            # by seeing if the first column contains text and second column often contains numbers
+            elif df.shape[0] > 1:
+                col0_all_text = df.iloc[:, 0].astype(str).str.strip().str.len() > 0
+                col1_has_numbers = df.iloc[:, 1].astype(str).str.contains(r'\d').fillna(False)
+                if col0_all_text.all() and col1_has_numbers.any():
+                    is_parameter_value_table = True
 
         for idx, row in df.iterrows():
             from models import AcceptanceCriterion
@@ -130,6 +152,43 @@ def extract_from_tps_tables(tables_data: Dict[str, Any], doc_meta: Dict[str, Any
                 ac_list = extract_numbers_with_units(raw_text)
                 subject = infer_subject([], raw_text, "generator")
                 canonical_statement = canonicalize(subject, raw_text)
+            elif is_parameter_value_table:
+                # Extract key and value from the parameter-value table
+                param_name = str(row.iloc[0]).strip() if not pd.isna(row.iloc[0]) else ""
+                param_value = str(row.iloc[1]).strip() if not pd.isna(row.iloc[1]) else ""
+                
+                if not param_name or not param_value:
+                    continue  # Skip empty rows
+                
+                row_id = f"{table_id}:{idx+1}"
+                
+                # Use parameter name as the subject
+                subject = param_name.lower()
+                if subject.endswith(":"):
+                    subject = subject[:-1].strip()
+                
+                # The raw text is the parameter and its value
+                raw_text = f"{param_name}: {param_value}"
+                
+                # Extract numeric criteria from the value
+                ac_list = extract_numbers_with_units(param_value)
+                
+                # If no acceptance criteria were found but the value has numbers, add a default one
+                if not ac_list and re.search(r'\d', param_value):
+                    # Try to parse unit from the value text
+                    unit_match = re.search(r'\d+(?:\.\d+)?\s*([a-zA-Z°%]+(?:/[a-zA-Z]+)?)', param_value)
+                    unit = unit_match.group(1) if unit_match else None
+                    unit = norm_unit(unit) if unit else None
+                    
+                    # Try to extract the first number
+                    num_match = re.search(r'(\d+(?:\.\d+)?)', param_value)
+                    if num_match:
+                        value = float(num_match.group(1))
+                        ac_list.append(AcceptanceCriterion(id=f"{row_id}-eq", text=f"= {value} {unit or ''}".strip(), 
+                                                           comparator="=", value=value, unit=unit))
+                
+                # Create canonical statement
+                canonical_statement = f"The {subject} shall be {param_value}"
             else:
                 row_id = str(row[id_col]).strip() if id_col in df.columns and not pd.isna(row[id_col]) else f"{table_id}:{idx+1}"
                 subject = (str(row[subj_col]).strip() if subj_col in df.columns and not pd.isna(row[subj_col]) else "generator")
@@ -174,7 +233,7 @@ def extract_from_tps_tables(tables_data: Dict[str, Any], doc_meta: Dict[str, Any
                 subject=subject,
                 category=guess_category([], raw_text),
                 tags=[],
-                evidence_query=f"{subject} {canonical_statement}",
+                evidence_query=make_evidence_query(subject, canonical_statement, collect_references(raw_text)),
             )
             requirements.append(req)
 

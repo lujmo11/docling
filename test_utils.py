@@ -1,5 +1,5 @@
 import unittest
-from utils import normalize_unit, extract_numbers_with_units, find_normative_strength, SectionTracker, canonicalize, infer_subject, collect_references, guess_category
+from utils import normalize_unit, extract_numbers_with_units, find_normative_strength, SectionTracker, canonicalize, infer_subject, collect_references, guess_category, make_evidence_query
 
 class TestUtils(unittest.TestCase):
 
@@ -170,6 +170,54 @@ class TestUtils(unittest.TestCase):
             with self.subTest(section_path=section_path, raw_text=raw_text):
                 result = guess_category(section_path, raw_text)
                 self.assertEqual(result, expected)
+
+    def test_make_evidence_query(self):
+        """Test evidence query generation."""
+        # Test with references and numeric criteria
+        subject = "generator"
+        canonical = "Enclosure protection shall be at least IP54 according to IEC 60034-5."
+        refs = ["IEC 60034-5"]
+        
+        query = make_evidence_query(subject, canonical, refs)
+        
+        # Check that query contains essential components
+        self.assertIn("generator", query.lower())
+        self.assertIn("protection", query.lower())
+        self.assertIn("enclosure", query.lower())
+        self.assertIn("IEC 60034-5", query)
+        
+        # Test with multiple references (should limit to 2)
+        refs_many = ["IEC 60034-5", "ISO 12345", "DIN 67890", "UL 9999"]
+        query_many = make_evidence_query(subject, canonical, refs_many)
+        
+        # Should contain at most 2 references
+        ref_count = sum(1 for ref in refs_many if ref in query_many)
+        self.assertLessEqual(ref_count, 2)
+        
+        # Test with numeric criteria
+        canonical_numeric = "Vibration shall be <= 2.5 mm/s during operation."
+        query_numeric = make_evidence_query("bearing", canonical_numeric, [])
+        
+        self.assertIn("bearing", query_numeric.lower())
+        self.assertIn("vibration", query_numeric.lower())
+        # Should include numeric constraint somehow
+        self.assertTrue(any(char.isdigit() for char in query_numeric))
+        
+        # Test with empty canonical (edge case)
+        query_empty = make_evidence_query("generator", "", [])
+        self.assertIn("generator", query_empty.lower())
+        self.assertIn("requirement", query_empty.lower())
+        
+        # Test query length constraint
+        long_canonical = "This is a very long requirement statement with many words that should be truncated to keep the query concise and focused on the most important terms for evidence matching."
+        query_long = make_evidence_query("system", long_canonical, ["REF1", "REF2"])
+        self.assertLessEqual(len(query_long), 125)  # Should be reasonably short
+        
+        # Test that subject is always included
+        test_subjects = ["generator", "motor", "bearing", "encoder"]
+        for subj in test_subjects:
+            q = make_evidence_query(subj, "Some requirement text", [])
+            self.assertIn(subj, q.lower())
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import csv
+import re
 from pathlib import Path
 from collections import Counter, defaultdict
 from typing import List, Dict, Any, Optional, Tuple
@@ -42,6 +44,111 @@ def summarize_requirements(reqs: List[Dict[str, Any]]) -> Dict[str, Any]:
         "normative_strength": dict(strength),
         "top_references": ref_counter.most_common(8),
     }
+
+
+def _get_text(item: Dict[str, Any]) -> str:
+    return (
+        item.get("canonical")
+        or item.get("canonical_statement")
+        or item.get("raw")
+        or item.get("text")
+        or ""
+    )
+
+
+def _get_uid(item: Dict[str, Any]) -> str:
+    return item.get("uid") or item.get("requirement_uid") or item.get("id") or ""
+
+
+def tokenize(text: str) -> List[str]:
+    text = (text or "").lower()
+    tokens = re.findall(r"\b[a-z0-9]+\b", text)
+    return tokens
+
+
+def extract_numbers(text: str) -> List[str]:
+    return re.findall(r"\b\d+(?:[\.,]\d+)?\b", text or "")
+
+
+def jaccard(a: List[str], b: List[str]) -> float:
+    sa = set(a)
+    sb = set(b)
+    if not sa and not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def match_requirements_to_design(reqs: List[Dict[str, Any]], design_reqs: List[Dict[str, Any]], out_csv_path: Path) -> Path:
+    rows = []
+    for r in reqs:
+        r_text = _get_text(r)
+        r_tokens = tokenize(r_text)
+        r_nums = set(extract_numbers(r_text))
+        r_refs = set(r.get("references") or [])
+
+        best = None
+        best_score = -1.0
+        best_match = None
+        for d in design_reqs:
+            d_text = _get_text(d)
+            d_tokens = tokenize(d_text)
+            d_nums = set(extract_numbers(d_text))
+            d_refs = set(d.get("references") or [])
+
+            token_score = jaccard(r_tokens, d_tokens)
+            num_score = 1.0 if (r_nums and (r_nums & d_nums)) else 0.0
+            ref_score = 1.0 if (r_refs and (r_refs & d_refs)) else 0.0
+
+            score = (0.6 * token_score) + (0.25 * num_score) + (0.15 * ref_score)
+
+            if score > best_score:
+                best_score = score
+                best = d
+                best_match = {
+                    "score": score,
+                    "token_score": token_score,
+                    "num_score": num_score,
+                    "ref_score": ref_score,
+                    "matched_tokens": list(set(r_tokens) & set(d_tokens)),
+                    "matched_numbers": list(r_nums & d_nums),
+                    "matched_refs": list(r_refs & d_refs),
+                }
+
+        rows.append({
+            "req_uid": _get_uid(r),
+            "req_text": r_text,
+            "best_design_uid": _get_uid(best) if best else "",
+            "best_design_text": _get_text(best) if best else "",
+            "match_score": round(best_match["score"], 4) if best_match else 0.0,
+            "token_score": round(best_match["token_score"], 4) if best_match else 0.0,
+            "num_score": best_match["num_score"] if best_match else 0.0,
+            "ref_score": best_match["ref_score"] if best_match else 0.0,
+            "matched_tokens": ";".join(sorted(best_match["matched_tokens"])) if best_match else "",
+            "matched_numbers": ";".join(sorted(best_match["matched_numbers"])) if best_match else "",
+            "matched_refs": ";".join(sorted(best_match["matched_refs"])) if best_match else "",
+        })
+
+    fieldnames = [
+        "req_uid",
+        "req_text",
+        "best_design_uid",
+        "best_design_text",
+        "match_score",
+        "token_score",
+        "num_score",
+        "ref_score",
+        "matched_tokens",
+        "matched_numbers",
+        "matched_refs",
+    ]
+    out_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+    return out_csv_path
 
 
 def convert_if_needed(doc_path: Path, out_dir: Optional[Path], reconvert: bool) -> Path:
@@ -137,6 +244,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("\nDesign samples:")
     for r in pick_samples(tps_reqs, 3):
         print(f"- {r.get('requirement_uid')}: {r.get('canonical_statement')}  [cat={r.get('category')}, refs={r.get('references') or []}]")
+
+    # Match RS requirements to design items and write coverage CSV
+    try:
+        coverage_path = rs_out_dir / "requirements_coverage.csv"
+        match_requirements_to_design(rs_reqs, tps_reqs, coverage_path)
+        print(f"\nWrote requirements coverage CSV: {coverage_path}")
+    except Exception as e:
+        print(f"Failed to write coverage CSV: {e}")
 
     return 0
 
