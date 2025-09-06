@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Optional
 import datetime
 import json
+import shutil
+import os
+import string
+import re
 
 # For table normalization and file outputs
 import pandas as pd
@@ -201,6 +205,231 @@ def convert_docx(source: str, out_dir: str, extract_reqs: bool = True) -> dict:
             # Do not re-raise; allow main conversion to continue
 
     logger.info("Conversion successful for %s", source)
+    # --- try to rename output folder based on front-page info (TPS -> TPS, RS -> RS) ---
+    try:
+        def sanitize_for_filename(s: str) -> str:
+            if not s:
+                return ""
+            invalid = '<>:"/\\|?*\n\r\t'
+            table = str.maketrans({c: " " for c in invalid})
+            out_s = s.translate(table)
+            out_s = "".join(ch for ch in out_s if ch in string.printable)
+            out_s = " ".join(out_s.split())
+            return out_s.strip()
+
+        def find_doc_frontpage_info(out_path: Path) -> dict:
+            info = {"type": None, "id": None, "desc": None}
+            doc_json_path = out_path / "document.json"
+            tables_json_path = out_path / "tables_data.json"
+            md_path = out_path / "document.md"
+            text_lines = []
+            # First, try to extract Document/Description from tables_data.json (common front page pattern)
+            try:
+                if tables_json_path.exists():
+                    tbl_raw = json.loads(tables_json_path.read_text(encoding="utf-8"))
+                    # look for table entries that include 'Document:' and 'Description:' cells
+                    for t in tbl_raw.values():
+                        csv = t.get("csv_data", "")
+                        if not csv:
+                            continue
+                        # simple search for labels
+                        if "Document:" in csv or "Description:" in csv:
+                            # Handle multiline cells with Document:\nA012-5599 VER 05 format
+                            # First try to extract from quoted cells that span multiple lines
+                            doc_match = re.search(r'"Document:\s*\n([^"]+)"', csv)
+                            if doc_match:
+                                val = doc_match.group(1).strip()
+                                if val and not val.lower() in ('confidential', 'tbd', 'tba'):
+                                    info["id"] = val
+                            desc_match = re.search(r'"Description:\s*\n([^"]+)"', csv)
+                            if desc_match:
+                                val = desc_match.group(1).strip()
+                                if val and not val.lower() in ('confidential', 'tbd', 'tba'):
+                                    info["desc"] = val
+                            # Also try single-line format
+                            for line in csv.splitlines():
+                                if line.strip().startswith("Document:"):
+                                    val = line.split("Document:", 1)[1].strip().strip('"')
+                                    if val and not info.get("id") and not val.lower() in ('confidential', 'tbd', 'tba'):
+                                        info["id"] = val
+                                if line.strip().startswith("Description:"):
+                                    val = line.split("Description:", 1)[1].strip().strip('"')
+                                    if val and not info.get("desc") and not val.lower() in ('confidential', 'tbd', 'tba'):
+                                        info["desc"] = val
+                            # If we found something, break
+                            if info.get("id") or info.get("desc"):
+                                break
+            except Exception:
+                pass
+            try:
+                if doc_json_path.exists():
+                    raw = json.loads(doc_json_path.read_text(encoding="utf-8"))
+                    blocks = None
+                    if isinstance(raw, dict):
+                        if "blocks" in raw:
+                            blocks = raw.get("blocks")
+                        elif "document" in raw and isinstance(raw["document"], dict) and "blocks" in raw["document"]:
+                            blocks = raw["document"]["blocks"]
+                    if blocks:
+                        for b in blocks[:60]:
+                            t = ""
+                            if isinstance(b, dict):
+                                if b.get("type") == "heading":
+                                    t = b.get("text", "")
+                                elif b.get("type") in ("paragraph", "list"):
+                                    t = b.get("text", "")
+                            if t:
+                                text_lines.append(t)
+            except Exception:
+                pass
+            try:
+                if not text_lines and md_path.exists():
+                    lines = md_path.read_text(encoding="utf-8").splitlines()
+                    for l in lines[:80]:
+                        if l.strip():
+                            text_lines.append(l.strip())
+            except Exception:
+                pass
+
+            joined = "\n".join(text_lines).upper()
+            if "TECHNICAL PURCHASE SPECIFICATION" in joined or any(l.startswith("TPS") for l in joined.splitlines()[:6]):
+                info["type"] = "TPS"
+            elif "REQUIREMENT SPECIFICATION" in joined or "REQUIREMENTS SPECIFICATION" in joined:
+                info["type"] = "RS"
+            else:
+                # fallback to folder name hints
+                nm = str(out.name).upper()
+                if nm.startswith("TPS"):
+                    info["type"] = "TPS"
+                elif nm.startswith("RS"):
+                    info["type"] = "RS"
+
+            # If not already set by tables, try regex on joined text for doc id
+            if not info.get("id"):
+                m = re.search(r'\b(\d{4}[-\s]?\d{4})(?:\s*[Vv]\s*\d{1,3})?\b', joined)
+                if m:
+                    info["id"] = m.group(0).replace(" ", "")
+
+            desc = None
+            for line in text_lines:
+                up = line.strip()
+                if not up:
+                    continue
+                if info.get("id") and info["id"] in up.replace(" ", ""):
+                    continue
+                up_words = up.split()
+                if len(up_words) >= 3 and len(up) > 10:
+                    if not re.search(r'\bIEC\b|\bISO\b|\bDIN\b|\bTPS\b|\bRS\b|\bVESTAS\b', up, re.I):
+                        desc = up
+                        break
+            if not desc and text_lines:
+                desc = text_lines[1] if len(text_lines) > 1 else text_lines[0]
+            if desc:
+                info["desc"] = " ".join(desc.split())
+            return info
+
+        def normalize_docid(raw: str) -> str:
+            if not raw:
+                return ""
+            # Normalize variations like 01014242V05, 0101-4242V05, 0101-4242 V05 -> '0101-4242 V05'
+            m = re.search(r'(\d{4})[-\s]?(\d{4})(?:\D*([Vv]\s*\d{1,3}))?', raw)
+            if not m:
+                return raw.strip()
+            part1 = m.group(1)
+            part2 = m.group(2)
+            v = m.group(3) or ''
+            v = v.replace(' ', '') if v else ''
+            if v:
+                return f"{part1}-{part2} {v.upper()}"
+            return f"{part1}-{part2}"
+
+
+        def assemble_pretty_name(info: dict, fallback: str) -> str:
+            typ = (info.get("type") or "").upper()
+            docid = info.get("id") or ""
+            desc = info.get("desc") or ""
+            # normalize docid
+            docid = normalize_docid(docid)
+            # shorten and clean description
+            desc = desc.replace("/", "/").replace("&", "&")
+            desc = " ".join(desc.split())[:120]
+            # Remove problematic punctuation from description but keep slashes and ampersands
+            desc = re.sub(r'[<>:\\"\|\?\*\n\r\t]', ' ', desc)
+            desc = desc.strip(" -_.,")
+            parts = []
+            if typ:
+                parts.append(typ)
+            if docid:
+                parts.append(docid)
+            if desc:
+                parts.append(desc)
+            if not parts:
+                return sanitize_for_filename(fallback)
+            pretty = " - ".join(parts)
+            return sanitize_for_filename(pretty)
+
+        pretty_info = find_doc_frontpage_info(out)
+        pretty_base = assemble_pretty_name(pretty_info, base_name)
+        if pretty_base and pretty_base != base_name:
+            parent = out.parent
+            candidate = parent / f"{pretty_base}_output"
+            suffix = 1
+            while candidate.exists():
+                candidate = parent / f"{pretty_base}_output_run{suffix}"
+                suffix += 1
+            shutil.move(str(out), str(candidate))
+            # update output_files values to new folder
+            for k, v in list(output_files.items()):
+                try:
+                    p = Path(v)
+                    output_files[k] = str(candidate / p.name)
+                except Exception:
+                    pass
+
+            # Also rename common artifact files inside the folder to include the pretty base as prefix
+            try:
+                prefixes = [pretty_base]
+                files_to_prefix = [
+                    "document.md",
+                    "document.json",
+                    "document.doctags.txt",
+                    "tables_info.csv",
+                    "tables_data.json",
+                    "requirements.jsonl",
+                    "requirements.csv",
+                ]
+                for fname in files_to_prefix:
+                    src = candidate / fname
+                    if not src.exists():
+                        continue
+                    # skip if already prefixed
+                    if src.name.startswith(pretty_base):
+                        continue
+                    new_name = f"{pretty_base} - {fname}"
+                    dst = candidate / new_name
+                    # avoid overwriting existing file
+                    if dst.exists():
+                        # append run suffix
+                        i = 1
+                        while (candidate / f"{pretty_base} - {i} - {fname}").exists():
+                            i += 1
+                        dst = candidate / f"{pretty_base} - {i} - {fname}"
+                    src.rename(dst)
+                    # update output_files mapping if it referenced the old name
+                    for k, v in list(output_files.items()):
+                        try:
+                            pv = Path(v)
+                            if pv == src:
+                                output_files[k] = str(dst)
+                        except Exception:
+                            pass
+            except Exception:
+                logger.debug("Failed to prefix internal files", exc_info=True)
+            out = candidate
+            logger.info("Renamed output folder to %s", str(candidate))
+    except Exception:
+        logger.debug("Could not apply pretty name to output folder", exc_info=True)
+
     return output_files
 
 
