@@ -67,6 +67,48 @@ def extract_from_rs_text(doc_json: Dict[str, Any], doc_meta: Dict[str, Any]) -> 
     return requirements
 
 
+def extract_rs_markers_from_tables(tables_data: Dict[str, Any], doc_meta: Dict[str, Any]) -> List[Requirement]:
+    """Scan table CSV text for RS style markers (#123.4) and create minimal Requirement entries.
+
+    This supplements textual RS extraction when markers were embedded in 2-col tables that were
+    previously treated as TPS style. Avoid duplicates by tracking seen IDs.
+    """
+    requirements: List[Requirement] = []
+    seen: set[str] = set()
+    marker_re = re.compile(r'#\s*(\d+\s*\.\s*\d+)')
+    for table_id, table in (tables_data or {}).items():
+        csv_text = table.get("csv_data") or ""
+        if not csv_text:
+            continue
+        # Quick skip if no '#'
+        if '#' not in csv_text:
+            continue
+        for match in marker_re.finditer(csv_text):
+            marker_id = match.group(1).replace(" ", "")
+            uid = f"RS:#{marker_id}"
+            if uid in seen:
+                continue
+            seen.add(uid)
+            req = Requirement(
+                requirement_uid=uid,
+                doc_meta=doc_meta,
+                section_path=[],
+                source_anchor={"type": "table", "ref": table_id, "pos": match.start()},
+                normative_strength=None,
+                canonical_statement=f"Requirement #{marker_id}",
+                requirement_raw=f"#{marker_id}",
+                acceptance_criteria=[],
+                verification_method=None,
+                references=[],
+                subject="generator",
+                category=None,
+                tags=[],
+                evidence_query=f"requirement {marker_id}",
+            )
+            requirements.append(req)
+    return requirements
+
+
 def extract_from_tps_tables(tables_data: Dict[str, Any], doc_meta: Dict[str, Any]) -> List[Requirement]:
     """Extracts requirements from TPS-style tables.
 

@@ -38,6 +38,10 @@ def write_requirements_csv(requirements: List[Requirement], file_path: Path):
         "page_range",
         "parent_id",
         "confidence",
+        "source_type",
+        "source_location",
+        "is_stub",
+        "raw_section_header",
     ]
 
     if not requirements:
@@ -69,6 +73,10 @@ def write_requirements_csv(requirements: List[Requirement], file_path: Path):
             "page_range": to_json(req.page_range),
             "parent_id": req.parent_id,
             "confidence": req.confidence,
+            "source_type": getattr(req, 'source_type', None),
+            "source_location": to_json(getattr(req, 'source_location', None)),
+            "is_stub": getattr(req, 'is_stub', False),
+            "raw_section_header": getattr(req, 'raw_section_header', None),
         })
 
     pd.DataFrame(records, columns=columns).to_csv(file_path, index=False)

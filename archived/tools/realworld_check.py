@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 # Reuse our conversion + extraction pipeline
 import simple as pipeline
+from utils import build_output_subdir
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -153,7 +154,7 @@ def match_requirements_to_design(reqs: List[Dict[str, Any]], design_reqs: List[D
 
 def convert_if_needed(doc_path: Path, out_dir: Optional[Path], reconvert: bool) -> Path:
     if out_dir is None:
-        out_dir = Path(f"{doc_path.stem}_output")
+        out_dir = build_output_subdir(doc_path.stem)
     # Reuse if exists and not forced to reconvert
     if out_dir.exists() and not reconvert:
         return out_dir

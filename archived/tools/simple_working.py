@@ -15,6 +15,12 @@ except ImportError:
     print("Error: The 'docling' package is not installed. Please install it using 'pip install docling'", file=sys.stderr)
     sys.exit(1)
 
+try:
+    from pandoc_normalizer import normalize_docx_with_pandoc, is_normalized_file
+    PANDOC_AVAILABLE = True
+except ImportError:
+    PANDOC_AVAILABLE = False
+
 
 def setup_logging(level: int = logging.INFO, logfile: Optional[Path] = None) -> None:
     handlers = [logging.StreamHandler(sys.stdout)]
@@ -28,11 +34,31 @@ def setup_logging(level: int = logging.INFO, logfile: Optional[Path] = None) -> 
     )
 
 
-def convert_docx(source: str, out_dir: str) -> dict:
+def convert_docx(source: str, out_dir: str, use_pandoc_normalization: bool = False) -> dict:
     """Convert document using current docling API with multi-format export and table extraction."""
     logger = logging.getLogger("simple")
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    
+    source_path = Path(source)
+    actual_source = source_path
+    
+    # Step 1: Pandoc normalization if requested
+    if use_pandoc_normalization and PANDOC_AVAILABLE and source_path.suffix.lower() == '.docx':
+        if not is_normalized_file(source_path):
+            logger.info("Normalizing DOCX with Pandoc before Docling processing...")
+            try:
+                normalized_path = normalize_docx_with_pandoc(source_path)
+                actual_source = normalized_path
+                logger.info(f"Using normalized file for processing: {normalized_path}")
+            except Exception as e:
+                logger.warning(f"Pandoc normalization failed, proceeding with original file: {e}")
+                actual_source = source_path
+        else:
+            logger.info("File appears to already be normalized, using as-is")
+            actual_source = source_path
+    elif use_pandoc_normalization and not PANDOC_AVAILABLE:
+        logger.warning("Pandoc normalization requested but pandoc_normalizer not available")
 
     logger.debug("Creating DocumentConverter instance")
     try:
@@ -41,16 +67,16 @@ def convert_docx(source: str, out_dir: str) -> dict:
         logger.exception("Failed to instantiate DocumentConverter: %s", e)
         raise
 
-    logger.info("Converting source: %s", source)
+    logger.info("Converting source: %s", actual_source)
     try:
-        result = conv.convert(source)
+        result = conv.convert(str(actual_source))
     except Exception as e:
-        logger.exception("Conversion raised an exception for %s: %s", source, e)
+        logger.exception("Conversion raised an exception for %s: %s", actual_source, e)
         raise
 
     doc = getattr(result, "document", None)
     if doc is None:
-        logger.error("No document returned from converter for %s", source)
+        logger.error("No document returned from converter for %s", actual_source)
         raise ValueError("No document returned from converter")
 
     output_files = {}
@@ -130,6 +156,7 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--log-level", default="INFO", help="Set log level (DEBUG, INFO, WARNING, ERROR)")
     parser.add_argument("--log-file", default=None, help="Optional log file path")
     parser.add_argument("--out-dir", default=None, help="Output directory for all files (default: source_name_output)")
+    parser.add_argument("--normalize", action="store_true", help="Normalize DOCX with Pandoc before processing")
     args = parser.parse_args(argv)
 
     level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -147,7 +174,7 @@ def main(argv: Optional[list] = None) -> int:
             out_dir = f"{source_path.stem}_output"
         
         try:
-            output_files = convert_docx(str(source_path), out_dir)
+            output_files = convert_docx(str(source_path), out_dir, use_pandoc_normalization=args.normalize)
             logger.info("All files written to directory: %s", out_dir)
             for format_name, file_path in output_files.items():
                 logger.info("  %s: %s", format_name, file_path)
@@ -162,7 +189,7 @@ def main(argv: Optional[list] = None) -> int:
         logger.info("No source provided, using default sample file: %s", default_path)
         out_dir = args.out_dir or f"{default_path.stem}_output"
         try:
-            output_files = convert_docx(str(default_path), out_dir)
+            output_files = convert_docx(str(default_path), out_dir, use_pandoc_normalization=args.normalize)
             logger.info("All files written to directory: %s", out_dir)
             for format_name, file_path in output_files.items():
                 logger.info("  %s: %s", format_name, file_path)

@@ -38,3 +38,8 @@ class Requirement:
     id: Optional[str] = None
     text: Optional[str] = None
     source: Optional[str] = None
+    # New enriched provenance / structure fields (marker-first refactor)
+    source_type: Optional[str] = None              # e.g. 'paragraph', 'table_cell', 'table_row'
+    source_location: Optional[Dict[str, Any]] = None  # arbitrary location payload (table id, row/col indices, page)
+    is_stub: bool = False                          # true if created from marker only (no extracted text yet)
+    raw_section_header: Optional[str] = None        # nearest raw heading text captured at extraction time

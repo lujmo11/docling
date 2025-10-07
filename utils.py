@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from typing import List, Optional
 from models import AcceptanceCriterion
 
@@ -49,7 +50,6 @@ def normalize_unit(u: str) -> str:
 
 def extract_numbers_with_units(text: str) -> List[AcceptanceCriterion]:
     """Extracts numeric values with units from a string."""
-    # Pattern groups: comparator? value unit?
     pattern = re.compile(
         r'(?P<cmp>≤|>=|≥|<=|<|>|=|==)?\s*'
         r'(?P<val>\d+(?:\.\d+)?)\s*'
@@ -60,10 +60,7 @@ def extract_numbers_with_units(text: str) -> List[AcceptanceCriterion]:
         cmp_raw = m.group("cmp")
         val = float(m.group("val"))
         unit_raw = m.group("unit")
-        
-        # Default comparator is '=' if not specified
         cmp_ = COMPARATOR_MAP.get(cmp_raw, "=") if cmp_raw else "="
-        
         unit_norm = normalize_unit(unit_raw) if unit_raw else None
         crits.append(AcceptanceCriterion(id=f"numeric-{val}{unit_norm or ''}", text=m.group(0), comparator=cmp_, value=val, unit=unit_norm))
     return crits
@@ -85,268 +82,174 @@ class SectionTracker:
         self._stack: List[tuple[int, str]] = []
 
     def update_and_get_path(self, block: dict) -> List[str]:
-        """
-        Updates the heading stack based on the current block and returns the current section path.
-        """
         if block.get("type") == "heading":
             level = block.get("level", 1)
             text = block.get("text", "").strip()
-
             if text:
-                # Pop from stack until we find a level less than the current one
                 while self._stack and self._stack[-1][0] >= level:
                     self._stack.pop()
-                
                 self._stack.append((level, text))
-
         return [text for level, text in self._stack]
 
 def canonicalize(subject: str, raw: str) -> str:
-    """
-    Convert raw text into an unambiguous checkable statement.
-    
-    Args:
-        subject: The subject of the requirement (e.g., "generator")
-        raw: The raw requirement text
-        
-    Returns:
-        Canonicalized statement suitable for LLM matching
-    """
     raw = raw.strip()
     if not raw:
         return f"The {subject} shall comply with unspecified requirements."
-    
-    # Check if raw already starts with the subject (case-insensitive)
     subject_lower = subject.lower()
     raw_lower = raw.lower()
-    
-    # If it already starts with "the [subject]" or just "[subject]", leave it as-is
     if (raw_lower.startswith(f"the {subject_lower}") or 
         raw_lower.startswith(f"{subject_lower} ")):
         return raw
-    
-    # If it starts with "the" but not "the [subject]", leave it as-is
     if raw_lower.startswith("the "):
         return raw
-        
-    # If it already contains "shall" or "must", it's likely already a proper requirement statement
     if " shall " in raw_lower or " must " in raw_lower:
         return raw
-    
-    # Otherwise, prepend "The {subject} shall " and lowercase the first char of raw
     first_char = raw[0].lower() if raw else ""
     rest = raw[1:] if len(raw) > 1 else ""
-    
     return f"The {subject} shall {first_char}{rest}"
 
 def infer_subject(section_path: List[str], raw_text: str, default: str = "generator") -> str:
-    """
-    Simple subject inference with fallback to default.
-    
-    Args:
-        section_path: Current document section path
-        raw_text: Raw requirement text
-        default: Default subject to use
-        
-    Returns:
-        Inferred subject string
-    """
-    # For now, just return the default - this can be enhanced later
-    # with keyword-based inference from section_path and raw_text
     return default
 
 def collect_references(text: str) -> List[str]:
-    """
-    Collect standard references (IEC/ISO/DIN/UL/CSA) from text.
-    
-    Args:
-        text: Text to search for references
-        
-    Returns:
-        List of found reference strings
-    """
     references = []
-    
-    # Pattern for IEC standards: IEC followed by numbers, optionally with part numbers and years
     iec_pattern = r'\bIEC\s+\d+(?:-\d+)*(?::\d{4})?\b'
     references.extend(re.findall(iec_pattern, text, re.IGNORECASE))
-    
-    # Pattern for ISO standards: ISO followed by numbers, optionally with part numbers and years  
     iso_pattern = r'\bISO\s+\d+(?:-\d+)*(?::\d{4})?\b'
     references.extend(re.findall(iso_pattern, text, re.IGNORECASE))
-    
-    # Pattern for DIN standards: DIN followed by numbers
     din_pattern = r'\bDIN\s+\d+(?:-\d+)*\b'
     references.extend(re.findall(din_pattern, text, re.IGNORECASE))
-    
-    # Pattern for UL standards: UL followed by numbers, optionally with part numbers
     ul_pattern = r'\bUL\s+\d+(?:-\d+)*\b'
     references.extend(re.findall(ul_pattern, text, re.IGNORECASE))
-    
-    # Pattern for CSA standards: CSA followed by identifier
     csa_pattern = r'\bCSA\s+[A-Z]+-\d+(?:-\d+)*\b'
     references.extend(re.findall(csa_pattern, text, re.IGNORECASE))
-    
-    # Remove duplicates while preserving order
     seen = set()
     unique_refs = []
     for ref in references:
         if ref not in seen:
             seen.add(ref)
             unique_refs.append(ref)
-    
     return unique_refs
 
 def guess_category(section_path: List[str], raw_text: str) -> Optional[str]:
-    """
-    Guess the category of a requirement based on section path and content.
-    
-    Args:
-        section_path: Current document section path
-        raw_text: Raw requirement text
-        
-    Returns:
-        Guessed category string or None if no clear category
-    """
-    # Combine section path and raw text for keyword matching
     combined_text = " ".join(section_path + [raw_text]).lower()
-    
-    # Environmental category keywords (check first due to specificity)
     environmental_keywords = [
         "ip54", "ip55", "ip56", "enclosure protection", "ingress protection",
         "humidity", "altitude", "environmental", "climate", "weather", 
         "corrosion", "coating", "sealing", "ingress", "operating temperature",
         "ambient temperature", "storage temperature"
     ]
-    
-    # Electrical category keywords
     electrical_keywords = [
         "voltage", "current", "power", "electrical", "insulation", "conductor", 
         "winding", "stator", "rotor", "terminal", "connection", "earthing", 
         "grounding", "isolation", "dielectric", "breakdown", "surge", "overvoltage"
     ]
-    
-    # Mechanical category keywords  
     mechanical_keywords = [
         "vibration", "mechanical", "shaft", "bearing", "housing", "mounting",
         "coupling", "alignment", "balancing", "deflection", "forces", "torque",
         "speed", "rpm", "rotation", "clearance", "tolerance", "dimension"
     ]
-    
-    # Control/instrumentation category keywords (more specific patterns)
     control_keywords = [
         "encoder", "sensor monitoring", "control system", "feedback", "signal",
         "instrumentation", "measurement", "alarm", "trip", "pt100", 
         "thermocouple", "pressure sensor", "flow sensor"
     ]
-    
-    # Safety category keywords
     safety_keywords = [
         "safety", "emergency", "stop", "shutdown", "interlock", 
         "guard", "barrier", "hazard", "risk", "fail-safe", "redundancy"
     ]
-    
-    # Check for matches in order of specificity (environmental first)
     if any(keyword in combined_text for keyword in environmental_keywords):
         return "environmental"
     elif any(keyword in combined_text for keyword in electrical_keywords):
         return "electrical"
     elif any(keyword in combined_text for keyword in mechanical_keywords):
-        return "mechanical"  
+        return "mechanical"
     elif any(keyword in combined_text for keyword in control_keywords):
         return "control"
     elif any(keyword in combined_text for keyword in safety_keywords):
         return "safety"
-    
     return None
 
 def make_evidence_query(subject: str, canonical: str, refs: List[str]) -> str:
-    """
-    Generate a concise evidence query for a requirement.
-    
-    Args:
-        subject: The subject of the requirement (e.g., "generator")
-        canonical: Canonical requirement statement
-        refs: List of reference standards
-        
-    Returns:
-        A short query string suitable for search or LLM evidence matching
-    """
-    # Basic input validation
     if not canonical.strip():
         return f"{subject} requirement"
-    
-    # Simple stopwords to filter out
     stopwords = {
         "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", 
         "of", "with", "by", "shall", "must", "should", "may", "will", "be", 
         "is", "are", "was", "were", "have", "has", "had", "do", "does", "did"
     }
-    
-    # Tokenize canonical statement and filter
     tokens = re.findall(r'\b\w+\b', canonical.lower())
     content_tokens = [t for t in tokens if t not in stopwords and len(t) > 2]
-    
-    # Score tokens for importance
     scored_tokens = []
     for token in content_tokens:
         score = 0
-        
-        # High priority for numeric-looking tokens and units
         if re.match(r'\d+', token) or token in ["ip54", "ip55", "ip56", "kv", "rpm", "hz", "degc"]:
             score += 3
-        
-        # Medium priority for technical terms
         if any(keyword in token for keyword in ["protection", "enclosure", "voltage", "current", 
                                                "vibration", "bearing", "stator", "rotor", "winding"]):
             score += 2
-        
-        # Subject-related tokens get priority
         if subject.lower() in token or token in subject.lower():
             score += 2
-        
-        # Default score for other content words
         score += 1
-        
         scored_tokens.append((score, token))
-    
-    # Sort by score and take top tokens
-    scored_tokens.sort(key=lambda x: (-x[0], x[1]))  # Sort by score desc, then alphabetically
+    scored_tokens.sort(key=lambda x: (-x[0], x[1]))
     selected_tokens = [token for score, token in scored_tokens[:6]]
-    
-    # Extract numeric values with units from the canonical statement
     numeric_criteria = extract_numbers_with_units(canonical)
     numeric_parts = []
-    for criterion in numeric_criteria[:2]:  # Limit to first 2 numeric criteria
+    for criterion in numeric_criteria[:2]:
         comp = criterion.comparator
         val = criterion.value
         unit = criterion.unit or ""
         numeric_parts.append(f"{comp} {val} {unit}".strip())
-    
-    # Build query components
     query_parts = [subject]
-    
-    # Add selected content tokens
-    query_parts.extend(selected_tokens[:4])  # Limit content tokens
-    
-    # Add numeric criteria
+    query_parts.extend(selected_tokens[:4])
     query_parts.extend(numeric_parts)
-    
-    # Add up to 2 references
     if refs:
         query_parts.extend(refs[:2])
-    
-    # Join and clean up
     query = " ".join(query_parts)
-    query = re.sub(r'\s+', ' ', query)  # Collapse whitespace
+    query = re.sub(r'\s+', ' ', query)
     query = query.strip()
-    
-    # Truncate if too long (keep subject + first few important parts)
     if len(query) > 120:
-        # Keep subject + first 3 content tokens + first reference
         safe_parts = [subject] + selected_tokens[:3]
         if refs:
             safe_parts.append(refs[0])
         query = " ".join(safe_parts)
-    
     return query
+
+# --- Centralized output directory utilities ---
+
+def get_repo_root() -> Path:
+    """Return repository root (directory containing this file).
+
+    This is a simple heuristic sufficient for this project layout.
+    """
+    return Path(__file__).parent
+
+def ensure_output_base() -> Path:
+    """Ensure the central 'output' directory exists and return it.
+
+    Used to aggregate all generated artifacts instead of scattering
+    `*_output` folders in the repository root.
+    """
+    root = get_repo_root()
+    out_base = root / 'output'
+    out_base.mkdir(parents=True, exist_ok=True)
+    return out_base
+
+def build_output_subdir(base_name: str) -> Path:
+    """Return a unique subdirectory inside central output for a document.
+
+    Mirrors previous pattern of `<name>_output` while nesting under
+    the root 'output' directory. If directory exists, add `_runN` suffix.
+    """
+    out_base = ensure_output_base()
+    sanitized = re.sub(r'[\\/]+', '-', base_name).strip()
+    candidate = out_base / f"{sanitized}_output"
+    if not candidate.exists():
+        return candidate
+    suffix = 1
+    while True:
+        run_candidate = out_base / f"{sanitized}_output_run{suffix}"
+        if not run_candidate.exists():
+            return run_candidate
+        suffix += 1
